@@ -138,7 +138,7 @@ class ControlPanel:
             "Max res",
             512,
             64,
-            2048,
+            4096,
             100,
             cb_hook=lambda _: rerender_cb(),
             hint="Maximum resolution to render in viewport",

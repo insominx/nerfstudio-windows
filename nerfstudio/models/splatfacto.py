@@ -23,12 +23,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Literal, Optional, Tuple, Type, Union
 
 import torch
-from gsplat.strategy import DefaultStrategy, MCMCStrategy
-
-try:
-    from gsplat.rendering import rasterization
-except ImportError:
-    print("Please install gsplat>=1.0.0")
 from pytorch_msssim import SSIM
 from torch.nn import Parameter
 
@@ -44,6 +38,32 @@ from nerfstudio.utils.math import k_nearest_sklearn, random_quat_tensor
 from nerfstudio.utils.misc import torch_compile
 from nerfstudio.utils.rich_utils import CONSOLE
 from nerfstudio.utils.spherical_harmonics import RGB2SH, SH2RGB, num_sh_bases
+
+
+_GSPLAT = None
+
+
+def _require_gsplat():
+    global _GSPLAT
+    if _GSPLAT is not None:
+        return _GSPLAT
+
+    try:
+        from gsplat.rendering import rasterization
+        from gsplat.strategy import DefaultStrategy, MCMCStrategy
+    except ImportError as e:
+        raise ImportError(
+            "splatfacto requires gsplat.\n"
+            "Install a matching gsplat wheel for your Torch version (recommended on Windows):\n"
+            '  pip install --find-links https://docs.gsplat.studio/whl/gsplat/ "gsplat==1.4.0+pt21cu118"\n'
+            "If you have an RTX 50xx (sm_120), you may need a source build with PTX fallback:\n"
+            "  pip uninstall -y gsplat\n"
+            "  set TORCH_CUDA_ARCH_LIST=9.0+PTX\n"
+            "  pip install -v --no-build-isolation git+https://github.com/nerfstudio-project/gsplat.git@v1.4.0\n"
+        ) from e
+
+    _GSPLAT = (rasterization, DefaultStrategy, MCMCStrategy)
+    return _GSPLAT
 
 
 def resize_image(image: torch.Tensor, d: int):
@@ -259,6 +279,7 @@ class SplatfactoModel(Model):
             )
 
         # Strategy for GS densification
+        _, DefaultStrategy, MCMCStrategy = _require_gsplat()
         if self.config.strategy == "default":
             # Strategy for GS densification
             self.strategy = DefaultStrategy(
@@ -364,6 +385,7 @@ class SplatfactoModel(Model):
 
     def step_post_backward(self, step):
         assert step == self.step
+        _, DefaultStrategy, MCMCStrategy = _require_gsplat()
         if isinstance(self.strategy, DefaultStrategy):
             self.strategy.step_post_backward(
                 params=self.gauss_params,
@@ -552,7 +574,8 @@ class SplatfactoModel(Model):
             colors_crop = torch.sigmoid(colors_crop).squeeze(1)  # [N, 1, 3] -> [N, 3]
             sh_degree_to_use = None
 
-        render, alpha, self.info = rasterization(  # type: ignore[reportPossiblyUnboundVariable]
+        rasterization, DefaultStrategy, _ = _require_gsplat()
+        render, alpha, self.info = rasterization(
             means=means_crop,
             quats=quats_crop,  # rasterization does normalization internally
             scales=torch.exp(scales_crop),

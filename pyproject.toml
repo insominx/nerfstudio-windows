@@ -64,11 +64,12 @@ dependencies = [
     "xatlas",
     "trimesh>=3.20.2",
     "timm==0.6.7",
-    "gsplat==1.4.0",
+    "gsplat==1.4.0; sys_platform != 'win32'",
+    "gsplat>=1.4.0; sys_platform == 'win32'",
     "pytorch-msssim",
     "pathos",
     "packaging",
-    "fpsample",
+    "fpsample; sys_platform != 'win32'",
     "tensorly"
 ]
 

@@ -30,7 +30,6 @@ from itertools import islice
 from pathlib import Path
 from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin
 
-import fpsample
 import numpy as np
 import torch
 from rich.progress import track
@@ -160,6 +159,10 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             self.random_generator.shuffle(indices)
             return indices
         elif self.config.train_cameras_sampling_strategy == "fps":
+            import importlib
+
+            fpsample = importlib.import_module("fpsample")
+
             if not hasattr(self, "train_unsampled_epoch_count"):
                 np.random.seed(self.config.train_cameras_sampling_seed)  # fix random seed of fpsample
                 self.train_unsampled_epoch_count = np.zeros(num_train_cameras)

@@ -25,6 +25,7 @@ from typing import Callable, Literal, Optional, Tuple
 
 import torch
 import yaml
+from torch.serialization import safe_globals
 
 from nerfstudio.configs.method_configs import all_methods
 from nerfstudio.engine.trainer import TrainerConfig
@@ -59,9 +60,18 @@ def eval_load_checkpoint(config: TrainerConfig, pipeline: Pipeline) -> Tuple[Pat
         load_step = config.load_step
     load_path = config.load_dir / f"step-{load_step:09d}.ckpt"
     assert load_path.exists(), f"Checkpoint {load_path} does not exist"
-    loaded_state = torch.load(load_path, map_location="cpu")
+    # PyTorch 2.6+ changed torch.load default weights_only=True, which can fail on
+    # Nerfstudio checkpoints that include non-tensor objects (e.g. numpy scalars) in state.
+    # We only ever load checkpoints from the local filesystem here; keep behavior stable.
+    try:
+        loaded_state = torch.load(load_path, map_location="cpu", weights_only=True)
+    except Exception:
+        # If weights-only unpickling fails due to missing safe globals, fall back to a full load.
+        with safe_globals([__import__("numpy")._core.multiarray.scalar]):
+            loaded_state = torch.load(load_path, map_location="cpu", weights_only=False)
     pipeline.load_pipeline(loaded_state["pipeline"], loaded_state["step"])
-    CONSOLE.print(f":white_check_mark: Done loading checkpoint from {load_path}")
+    # Avoid UnicodeEncodeError on Windows terminals with legacy codepages.
+    CONSOLE.print(f"Done loading checkpoint from {load_path}")
     return load_path, load_step
 
 

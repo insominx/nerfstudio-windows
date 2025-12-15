@@ -1,0 +1,3 @@
+# update-doc
+
+Become an expert on this project by reading all of the documentation under @docs/systems.  Do not write code or modify anything.  If you understand what you read, simply acknowledge.  If not, ask clarifying questions.  If you need to use the console, refer to @ai_console_prompt.md.  If you need to do Unity refactoring, refer to @unity-6.0-6.2-changes.md and @unity-style-lessons.md.  In all cases, review @agents.md.

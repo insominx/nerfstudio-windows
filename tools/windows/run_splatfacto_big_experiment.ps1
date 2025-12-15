@@ -12,6 +12,8 @@ param(
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]] $ExtraArgs = @(),
 
+  [string[]] $DataArgs = @(),
+
   [string] $ExportDir,
 
   [string] $RunTimestamp,
@@ -31,6 +33,7 @@ if ([string]::IsNullOrWhiteSpace($DataPath)) {
 }
 
 $defaults = @()
+$defaultsDataArgs = @()
 $defaultsConfig = Join-Path $repoRoot "tools\windows\splatfacto_big.defaults.json"
 $exportCfgEnabled = $false
 $exportCfgPlyColorMode = $null
@@ -41,6 +44,9 @@ if (Test-Path -LiteralPath $defaultsConfig) {
     $defaultsObj = (Get-Content -LiteralPath $defaultsConfig -Raw | ConvertFrom-Json)
     if ($null -ne $defaultsObj -and $null -ne $defaultsObj.cli_args) {
       $defaults = @($defaultsObj.cli_args)
+    }
+    if ($null -ne $defaultsObj -and $null -ne $defaultsObj.data_args) {
+      $defaultsDataArgs = @($defaultsObj.data_args)
     }
     if ($null -ne $defaultsObj -and $null -ne $defaultsObj.export_splat) {
       if ($null -ne $defaultsObj.export_splat.enabled) { $exportCfgEnabled = [bool]$defaultsObj.export_splat.enabled }
@@ -162,6 +168,10 @@ $allArgs = @($defaults + $ExtraArgs + $smokeArgs + $exportArgs)
 $allArgsQuoted = $allArgs | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
 $allArgsJoined = $allArgsQuoted -join ' '
 
+$allDataArgs = @($defaultsDataArgs + $DataArgs)
+$allDataArgsQuoted = $allDataArgs | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
+$allDataArgsJoined = $allDataArgsQuoted -join ' '
+
 # NOTE: cmd.exe /c does not reliably execute multi-line strings; write a temp .cmd script instead.
 $cmdLines = @(
   '@echo off',
@@ -194,7 +204,7 @@ $cmdLines = @(
   'set "DEFAULT_ARGS="',
   'if not "%NS_QUIT_ON_TRAIN_COMPLETION%"=="" set "DEFAULT_ARGS=--viewer.quit-on-train-completion True"',
 
-  """$($escaped.NsTrainExe)"" $method %DEFAULT_ARGS% $allArgsJoined $dataset --data ""$($escaped.DataPath)""",
+  """$($escaped.NsTrainExe)"" $method %DEFAULT_ARGS% $allArgsJoined $dataset $allDataArgsJoined --data ""$($escaped.DataPath)""",
   'if errorlevel 1 exit /b %errorlevel%',
   'if "%NS_DO_EXPORT%"=="" goto :eof',
   """$($escaped.NsExportExe)"" gaussian-splat --load-config ""$($escaped.ConfigYmlPath)"" --output-dir ""$($escaped.ExportDir)"" --output-filename ""$($escaped.ExportFilename)"" --ply-color-mode ""$($escaped.PlyColorMode)"""

@@ -21,6 +21,9 @@
 
     "--pipeline.datamanager.cache_images_type=float32"
   ],
+  "data_args": [
+    "--eval-mode=all"
+  ],
   "export_splat": {
     "enabled": false,
     "ply_color_mode": "sh_coeffs",
@@ -28,3 +31,4 @@
     "timestamp": null
   }
 }
+

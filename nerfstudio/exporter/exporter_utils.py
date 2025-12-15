@@ -31,6 +31,7 @@ from torch import Tensor
 
 from nerfstudio.cameras.camera_optimizers import CameraOptimizer
 from nerfstudio.cameras.cameras import Cameras
+from nerfstudio.cameras.cameras import CameraType
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.data.scene_box import OrientedBox
@@ -312,14 +313,30 @@ def collect_camera_poses_for_dataset(
         else:
             # print('exporting optimized camera pose for camera %d' % idx)
             camera = cameras[idx : idx + 1]
-            assert camera.metadata is not None
+            if camera.metadata is None:
+                camera.metadata = {}
             camera.metadata["cam_idx"] = idx
             transform = camera_optimizer.apply_to_camera(camera).tolist()[0]
+
+        camera_type_id = int(cameras.camera_type[idx].item())
+        camera_type_name = CameraType(camera_type_id).name
+        distortion = None
+        if cameras.distortion_params is not None:
+            distortion = cameras.distortion_params[idx].flatten().tolist()
 
         frames.append(
             {
                 "file_path": str(image_filename),
                 "transform": transform,
+                # Intrinsics (exported per-frame for simplicity).
+                "fx": float(cameras.fx[idx].item()),
+                "fy": float(cameras.fy[idx].item()),
+                "cx": float(cameras.cx[idx].item()),
+                "cy": float(cameras.cy[idx].item()),
+                "width": int(cameras.width[idx].item()),
+                "height": int(cameras.height[idx].item()),
+                "camera_type": camera_type_name,
+                "distortion_params": distortion,
             }
         )
 

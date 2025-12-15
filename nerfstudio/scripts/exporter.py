@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import typing
 from collections import OrderedDict
@@ -39,7 +40,11 @@ from nerfstudio.data.datamanagers.base_datamanager import VanillaDataManager
 from nerfstudio.data.datamanagers.parallel_datamanager import ParallelDataManager
 from nerfstudio.data.scene_box import OrientedBox
 from nerfstudio.exporter import texture_utils, tsdf_utils
-from nerfstudio.exporter.exporter_utils import collect_camera_poses, generate_point_cloud, get_mesh_from_filename
+from nerfstudio.exporter.exporter_utils import (
+    collect_camera_poses,
+    generate_point_cloud,
+    get_mesh_from_filename,
+)
 from nerfstudio.exporter.marching_cubes import generate_mesh_with_multires_marching_cubes
 from nerfstudio.fields.sdf_field import SDFField  # noqa
 from nerfstudio.models.splatfacto import SplatfactoModel
@@ -649,6 +654,182 @@ class ExportGaussianSplat(Exporter):
         ExportGaussianSplat.write_ply(str(filename), count, map_to_tensors)
 
 
+def _c2w_to_w2c_rotation_position(c2w_3x4: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert a camera-to-world 3x4 [R|t] to GauStudio's world-to-camera rotation + translation.
+
+    GauStudio expects:
+    - rotation: W2C[:3, :3]
+    - position: W2C[:3, 3]
+    """
+    c2w = np.asarray(c2w_3x4, dtype=np.float32)
+    if c2w.shape != (3, 4):
+        raise ValueError(f"Expected c2w shape (3, 4), got {c2w.shape}")
+    r_c2w = c2w[:3, :3]
+    t_c2w = c2w[:3, 3]
+    r_w2c = r_c2w.T
+    t_w2c = -(r_w2c @ t_c2w)
+    return r_w2c, t_w2c
+
+
+@dataclass
+class ExportGauStudioSplat(Exporter):
+    """
+    Export SplatFacto outputs in a GAUStudio-compatible layout:
+
+    <output_dir>/
+      cameras.json
+      point_cloud/
+        iteration_XXXX/
+          point_cloud.ply
+    """
+
+    iteration: int = 0
+    """Iteration number used in point_cloud/iteration_XXXX/."""
+
+    split: Literal["train", "eval", "all"] = "train"
+    """Which camera set to export into cameras.json."""
+
+    ply_color_mode: Literal["sh_coeffs", "rgb"] = "sh_coeffs"
+    """If "rgb", export colors as red/green/blue fields. Otherwise, export colors as SH coefficients."""
+
+    output_ply_name: str = "point_cloud.ply"
+    """Filename within point_cloud/iteration_XXXX/."""
+
+    def main(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        _, pipeline, _, _ = eval_setup(self.load_config, test_mode="inference")
+        assert isinstance(pipeline, VanillaPipeline)
+        assert isinstance(pipeline.model, SplatfactoModel)
+
+        model: SplatfactoModel = pipeline.model
+
+        # GauStudio constructs this path as: point_cloud/iteration_{str(iteration)}/point_cloud.ply
+        # (no zero-padding), so we export using the unpadded name by default.
+        point_cloud_dir = self.output_dir / "point_cloud" / f"iteration_{self.iteration}"
+        point_cloud_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Export cameras.json (GauStudio schema expects W2C rotation + translation).
+        train_frames, eval_frames = collect_camera_poses(pipeline)
+        if self.split == "train":
+            frames = train_frames
+        elif self.split == "eval":
+            frames = eval_frames
+        else:
+            frames = train_frames + eval_frames
+
+        cameras_json = []
+        for idx, frame in enumerate(frames):
+            c2w = np.asarray(frame["transform"], dtype=np.float32)
+            r_w2c, t_w2c = _c2w_to_w2c_rotation_position(c2w)
+            file_path = frame.get("file_path", "")
+            img_name = Path(str(file_path)).name if file_path else f"{idx:05d}.png"
+
+            cameras_json.append(
+                {
+                    "id": idx,
+                    "img_name": img_name,
+                    "width": int(frame["width"]),
+                    "height": int(frame["height"]),
+                    "fx": float(frame["fx"]),
+                    "fy": float(frame["fy"]),
+                    "cx": float(frame["cx"]),
+                    "cy": float(frame["cy"]),
+                    "rotation": r_w2c.tolist(),
+                    "position": t_w2c.tolist(),
+                }
+            )
+
+        cameras_json_path = self.output_dir / "cameras.json"
+        with open(cameras_json_path, "w", encoding="UTF-8") as f:
+            json.dump(cameras_json, f, indent=2)
+        CONSOLE.print(f"[bold green]:white_check_mark: Saved GauStudio cameras to {cameras_json_path}")
+
+        # --- Export gaussian PLY in 3DGS-style directory layout.
+        ply_path = point_cloud_dir / self.output_ply_name
+
+        map_to_tensors = OrderedDict()
+        with torch.no_grad():
+            positions = model.means.cpu().numpy()
+            count = positions.shape[0]
+            n = count
+            map_to_tensors["x"] = positions[:, 0]
+            map_to_tensors["y"] = positions[:, 1]
+            map_to_tensors["z"] = positions[:, 2]
+            map_to_tensors["nx"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["ny"] = np.zeros(n, dtype=np.float32)
+            map_to_tensors["nz"] = np.zeros(n, dtype=np.float32)
+
+            if self.ply_color_mode == "rgb":
+                colors = torch.clamp(model.colors.clone(), 0.0, 1.0).data.cpu().numpy()
+                colors = (colors * 255).astype(np.uint8)
+                map_to_tensors["red"] = colors[:, 0]
+                map_to_tensors["green"] = colors[:, 1]
+                map_to_tensors["blue"] = colors[:, 2]
+            elif self.ply_color_mode == "sh_coeffs":
+                shs_0 = model.shs_0.contiguous().cpu().numpy()
+                for i in range(shs_0.shape[1]):
+                    map_to_tensors[f"f_dc_{i}"] = shs_0[:, i, None]
+
+            if model.config.sh_degree > 0:
+                if self.ply_color_mode == "rgb":
+                    CONSOLE.print(
+                        "Warning: model has higher level of spherical harmonics, ignoring them and only export rgb."
+                    )
+                elif self.ply_color_mode == "sh_coeffs":
+                    shs_rest = model.shs_rest.transpose(1, 2).contiguous().cpu().numpy()
+                    shs_rest = shs_rest.reshape((n, -1))
+                    for i in range(shs_rest.shape[-1]):
+                        map_to_tensors[f"f_rest_{i}"] = shs_rest[:, i, None]
+
+            map_to_tensors["opacity"] = model.opacities.data.cpu().numpy()
+
+            scales = model.scales.data.cpu().numpy()
+            for i in range(3):
+                map_to_tensors[f"scale_{i}"] = scales[:, i, None]
+
+            quats = model.quats.data.cpu().numpy()
+            for i in range(4):
+                map_to_tensors[f"rot_{i}"] = quats[:, i, None]
+
+        select = np.ones(n, dtype=bool)
+        for k, t in map_to_tensors.items():
+            n_before = np.sum(select)
+            select = np.logical_and(select, np.isfinite(t).all(axis=-1))
+            n_after = np.sum(select)
+            if n_after < n_before:
+                CONSOLE.print(f"{n_before - n_after} NaN/Inf elements in {k}")
+        nan_count = np.sum(select) - n
+
+        low_opacity_gaussians = (map_to_tensors["opacity"]).squeeze(axis=-1) < -5.5373  # logit(1/255)
+        lowopa_count = np.sum(low_opacity_gaussians)
+        select[low_opacity_gaussians] = 0
+
+        if np.sum(select) < n:
+            CONSOLE.print(
+                f"{nan_count} Gaussians have NaN/Inf and {lowopa_count} have low opacity, only export {np.sum(select)}/{n}"
+            )
+            for k, t in map_to_tensors.items():
+                map_to_tensors[k] = map_to_tensors[k][select]
+            count = int(np.sum(select))
+
+        ExportGaussianSplat.write_ply(str(ply_path), count, map_to_tensors)
+        CONSOLE.print(f"[bold green]:white_check_mark: Saved GauStudio point cloud to {ply_path}")
+
+        # Backwards-compat convenience: also create a padded alias directory (iteration_0000, etc.)
+        # so older exports/scripts keep working without requiring a second full write.
+        padded_dir = self.output_dir / "point_cloud" / f"iteration_{self.iteration:04d}"
+        if padded_dir != point_cloud_dir:
+            padded_dir.mkdir(parents=True, exist_ok=True)
+            padded_ply_path = padded_dir / self.output_ply_name
+            if not padded_ply_path.exists():
+                try:
+                    os.link(ply_path, padded_ply_path)
+                except OSError:
+                    shutil.copy2(ply_path, padded_ply_path)
+            CONSOLE.print(f"[bold green]:white_check_mark: Alias point cloud at {padded_ply_path}")
+
+
 Commands = tyro.conf.FlagConversionOff[
     Union[
         Annotated[ExportPointCloud, tyro.conf.subcommand(name="pointcloud")],
@@ -657,6 +838,7 @@ Commands = tyro.conf.FlagConversionOff[
         Annotated[ExportMarchingCubesMesh, tyro.conf.subcommand(name="marching-cubes")],
         Annotated[ExportCameraPoses, tyro.conf.subcommand(name="cameras")],
         Annotated[ExportGaussianSplat, tyro.conf.subcommand(name="gaussian-splat")],
+        Annotated[ExportGauStudioSplat, tyro.conf.subcommand(name="gaustudio-splat")],
     ]
 ]
 

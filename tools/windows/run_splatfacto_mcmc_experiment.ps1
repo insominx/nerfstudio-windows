@@ -34,11 +34,23 @@ if ([string]::IsNullOrWhiteSpace($DataPath)) {
 
 $defaults = @()
 $defaultsDataArgs = @()
+$loggingStepsPerLog = $null
 $defaultsConfig = Join-Path $repoRoot "tools\windows\splatfacto_mcmc.defaults.json"
 $exportCfgEnabled = $false
 $exportCfgPlyColorMode = $null
 $exportCfgExportDir = $null
 $exportCfgTimestamp = $null
+function Get-ConfigStepsPerLog($obj) {
+  if ($null -eq $obj) { return $null }
+  $legacy = $obj.PSObject.Properties["logging_steps_per_log"]
+  if ($null -ne $legacy -and $null -ne $legacy.Value) { return [int]$legacy.Value }
+  $logging = $obj.PSObject.Properties["logging"]
+  if ($null -ne $logging -and $null -ne $logging.Value) {
+    $steps = $logging.Value.PSObject.Properties["steps_per_log"]
+    if ($null -ne $steps -and $null -ne $steps.Value) { return [int]$steps.Value }
+  }
+  return $null
+}
 if (Test-Path -LiteralPath $defaultsConfig) {
   try {
     $defaultsObj = (Get-Content -LiteralPath $defaultsConfig -Raw | ConvertFrom-Json)
@@ -48,6 +60,8 @@ if (Test-Path -LiteralPath $defaultsConfig) {
     if ($null -ne $defaultsObj -and $null -ne $defaultsObj.data_args) {
       $defaultsDataArgs = @($defaultsObj.data_args)
     }
+    $cfgStepsPerLog = Get-ConfigStepsPerLog $defaultsObj
+    if ($null -ne $cfgStepsPerLog) { $loggingStepsPerLog = $cfgStepsPerLog }
     if ($null -ne $defaultsObj -and $null -ne $defaultsObj.export_splat) {
       if ($null -ne $defaultsObj.export_splat.enabled) { $exportCfgEnabled = [bool]$defaultsObj.export_splat.enabled }
       if ($null -ne $defaultsObj.export_splat.ply_color_mode) { $exportCfgPlyColorMode = [string]$defaultsObj.export_splat.ply_color_mode }
@@ -55,7 +69,7 @@ if (Test-Path -LiteralPath $defaultsConfig) {
       if ($null -ne $defaultsObj.export_splat.timestamp) { $exportCfgTimestamp = [string]$defaultsObj.export_splat.timestamp }
     }
   } catch {
-    throw "Failed to parse defaults config at '$defaultsConfig'. Ensure it is valid JSON."
+    throw "Failed to load defaults config at '$defaultsConfig': $($_.Exception.Message)"
   }
 }
 
@@ -70,6 +84,8 @@ if ($defaults.Count -eq 0) {
       if ($null -ne $fallbackObj -and $null -ne $fallbackObj.data_args) {
         $defaultsDataArgs = @($fallbackObj.data_args)
       }
+      $cfgStepsPerLog = Get-ConfigStepsPerLog $fallbackObj
+      if ($null -ne $cfgStepsPerLog) { $loggingStepsPerLog = $cfgStepsPerLog }
       if ($null -ne $fallbackObj -and $null -ne $fallbackObj.export_splat) {
         if ($null -ne $fallbackObj.export_splat.enabled) { $exportCfgEnabled = [bool]$fallbackObj.export_splat.enabled }
         if ($null -ne $fallbackObj.export_splat.ply_color_mode) { $exportCfgPlyColorMode = [string]$fallbackObj.export_splat.ply_color_mode }
@@ -77,8 +93,16 @@ if ($defaults.Count -eq 0) {
         if ($null -ne $fallbackObj.export_splat.timestamp) { $exportCfgTimestamp = [string]$fallbackObj.export_splat.timestamp }
       }
     } catch {
-      throw "Failed to parse defaults config at '$fallbackConfig'. Ensure it is valid JSON."
+      throw "Failed to load defaults config at '$fallbackConfig': $($_.Exception.Message)"
     }
+  }
+}
+
+if ($null -ne $loggingStepsPerLog) {
+  $flag = "--logging.steps-per-log=$loggingStepsPerLog"
+  $alreadySet = @(@($defaults + $ExtraArgs) | Where-Object { $_ -match '^--logging\.steps-per-log(=|$)' })
+  if ($alreadySet.Count -eq 0) {
+    $defaults = @($defaults + $flag)
   }
 }
 

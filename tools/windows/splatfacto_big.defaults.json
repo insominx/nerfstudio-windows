@@ -19,11 +19,15 @@
     "--pipeline.model.camera_optimizer.mode=SO3xR3",
     "--pipeline.model.use_bilateral_grid=True",
 
-    "--pipeline.datamanager.cache_images_type=float32"
+    "--pipeline.datamanager.cache_images_type=uint8"
   ],
   "data_args": [
+    "--downscale-factor=1",
     "--eval-mode=all"
   ],
+  "logging": {
+    "steps_per_log": 10
+  },
   "export_splat": {
     "enabled": false,
     "ply_color_mode": "sh_coeffs",
